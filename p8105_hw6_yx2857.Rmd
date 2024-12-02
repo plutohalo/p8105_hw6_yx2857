@@ -1,0 +1,253 @@
+---
+title: "p8105_hw6_yx2857"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	warning = FALSE,
+	message = FALSE,
+  fig.width = 6,
+  fig.asp = .6,
+  out.width = "90%"
+)
+
+```
+
+```{r packages}
+library(tidyverse)
+library(broom)
+library(modelr)
+
+
+set.seed(2857)
+
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+```
+
+# Problem 1. 
+```{r q1_data}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31")|>
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10)|>
+  select(name, id, everything())
+```
+
+```{r}
+
+# Bootstrap sampling function
+boot_sample = function(df) {
+  boot_df = 
+    sample_frac(df, replace = TRUE) |>
+    arrange(tmin)  
+  return(boot_df)
+}
+
+# Generate bootstrap samples and fit models
+boot_straps = 
+  tibble(strap_number = 1:5000) |>
+  mutate(
+    strap_sample = map(strap_number, \(i) boot_sample(df = weather_df)),
+    models = map(strap_sample, \(samp) lm(tmax ~ tmin, data = samp)),
+    log_prodbeta = map(models, \(mod) broom::tidy(mod) |>
+      summarize(logprodbeta = prod(estimate) |> log()) |>
+      pull()),
+    r2 = map(models, \(mod) broom::glance(mod) |> pull(r.squared))
+  )
+
+
+boot_straps |>
+  ggplot(aes(x = r2|>unlist())) + geom_histogram(bins = 30, fill = "blue", color = "black") + labs(title = "Distribution of R-squared estimates", x = "R-squared", y = "Frequency")
+
+boot_straps |>
+  ggplot(aes(x = log_prodbeta|>unlist())) + geom_histogram(bins = 30, fill = "blue", color = "black") + labs(title = "Distribution of log(β̂0*β̂1) estimates", x = "log(β̂0*β̂1)", y = "Frequency")
+
+#95% confidence interval for R-squared
+r2_ci = 
+  boot_straps |>
+  summarize(
+    lower = quantile(r2|>unlist(), 0.025),
+    upper = quantile(r2|>unlist(), 0.975)
+  ) |>
+  mutate(ci = sprintf("[%0.3f, %0.3f]", lower, upper)) |>
+  pull(ci)
+
+#95% confidence interval for log(beta0 * beta1)
+log_prodbeta_ci = 
+  boot_straps |> 
+  summarize(
+    lower = quantile(log_prodbeta|>unlist(), 0.025),
+    upper = quantile(log_prodbeta|>unlist(), 0.975)
+  ) |>
+  mutate(ci = sprintf("[%0.3f, %0.3f]", lower, upper)) |>
+  pull(ci)
+```
+The distribution of the R-squared estimates is approximately normal, with a mean around 0.91. The distribution of the log of beta0 and beta1's product estimated is also almost normally distributed, with a mean around 2.01. The 95% confidence interval for R-squared is `r r2_ci`, and the 95% confidence interval for log(β̂0*β̂1) is `r log_prodbeta_ci`. 
+
+
+
+# Problem 2.  
+```{r}
+
+#read data from github
+homicide_data <- read_csv("https://raw.githubusercontent.com/washingtonpost/data-homicides/master/homicide-data.csv",
+                          show_col_types = FALSE)
+
+homicide_data <- homicide_data |>
+  mutate(city_state = str_c(city, ", ", state)) |>
+  filter(!city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")) |>
+  filter(victim_race %in% c("White", "Black")) |>
+  mutate(victim_age = as.numeric(victim_age))
+
+
+```
+
+```{r}
+# For the city of Baltimore, MD, use the glm function to fit a logistic regression with resolved vs unresolved as the outcome and victim age, sex and race as predictors. Save the output of glm as an R object; apply the broom::tidy to this object; and obtain the estimate and confidence interval of the adjusted odds ratio for solving homicides comparing male victims to female victims keeping all other variables fixed.
+
+baltimore_data <- homicide_data |> 
+  filter(city_state == "Baltimore, MD") |>
+  mutate(resolved = ifelse(disposition %in% c("Closed by arrest", "Closed without arrest"), 1, 0)) 
+
+
+baltimore_glm <- glm(resolved ~ victim_age + victim_sex + victim_race, data = baltimore_data, family = "binomial")
+
+
+# obtain the odds ratio of the victimMale
+baltimore_glm_male <- baltimore_glm |> broom::tidy() |> 
+  filter(term == "victim_sexMale") |> 
+  select(estimate, std.error) |> 
+  mutate(odds_ratio = exp(estimate), 
+         conf.low = exp(estimate - 1.96 * std.error),
+         conf.high = exp(estimate + 1.96 * std.error))
+
+```
+The adjusted odds ratio for solving homicides comparing male victims to female victims in Baltimore, MD is `r baltimore_glm_male|>pull(odds_ratio)|>round(2)`. The 95% confidence interval for the adjusted odds ratio is [`r baltimore_glm_male|>pull(conf.low)|>round(2)` , `r baltimore_glm_male|>pull(conf.high)|>round(2)`].   
+
+```{r}
+# Now run glm for each of the cities in your dataset, and extract the adjusted odds ratio (and CI) for solving homicides comparing male victims to female victims. Do this within a “tidy” pipeline, making use of purrr::map, list columns, and unnest as necessary to create a dataframe with estimated ORs and CIs for each city.
+
+city_glm <- homicide_data |> 
+  mutate(resolved = ifelse(disposition %in% c("Closed by arrest", "Closed without arrest"), 1, 0)) |>
+  group_by(city_state) |> 
+  nest() |> 
+  mutate(glm = map(data, ~glm(resolved ~ victim_sex + victim_age + victim_race, data = ., family = "binomial"))) |>
+  mutate(tidy = map(glm, broom::tidy)) |>
+  unnest(tidy) |>
+  filter(term == "victim_sexMale") |>
+  select(city_state, estimate, std.error) |>
+  mutate(odds_ratio = exp(estimate), 
+         conf.low = exp(estimate - 1.96 * std.error),
+         conf.high = exp(estimate + 1.96 * std.error))
+
+#Create a plot that shows the estimated ORs and CIs for each city. Organize cities according to estimated OR, and comment on the plot.
+
+city_glm |> 
+  ggplot(aes(x = reorder(city_state, odds_ratio), y = odds_ratio, ymin = conf.low, ymax = conf.high)) + 
+  geom_point() + 
+  geom_errorbar(width = 0.2) + 
+  coord_flip() + 
+  labs(title = "Estimated odds ratio of solving homicides male comparing to female by city", x = "City, State", y = "Estimated odds ratio") + 
+  theme(axis.text.y = element_text(size = 5), plot.title = element_text(size = 10))
+
+```
+
+# Problem 3.  
+
+```{r}
+# load data from https://p8105.com/data/birthweight.csv
+birthweight <- read_csv("https://p8105.com/data/birthweight.csv",
+                             show_col_types = FALSE)
+
+birthweight <- birthweight |> 
+  mutate(babysex = factor(babysex, levels = c(1, 2), labels = c("Male", "Female")),
+         frace = factor(frace, levels = c(1, 2, 3, 4, 8, 9), labels = c("White", "Black", "Asian", "Puerto Rican", "Other", "Unknown")),
+         malform = factor(malform, levels = c(0, 1), labels = c("Absent", "Present")),
+         mrace = factor(mrace, levels = c(1, 2, 3, 4, 8), labels = c("White", "Black", "Asian", "Puerto Rican", "Other")))
+```
+
+
+```{r}
+# Propose a regression model for birthweight. This model may be based on a hypothesized structure for the factors that underly birthweight, on a data-driven model-building process, or a combination of the two. Describe your modeling process and show a plot of model residuals against fitted values – use add_predictions and add_residuals in making this plot.
+
+mod1 <- lm(bwt ~ babysex + bhead + blength + malform, data = birthweight)
+#a show a plot of model residuals against fitted values – use add_predictions and add_residuals in making this plot.
+birthweight |>
+  add_predictions(mod1) |>
+  add_residuals(mod1) |>
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Model 1 - residuals against fitted values", x = "Fitted values", y = "Residuals")
+
+```
+I take a hypothesized structure for the factors that underly birthweight to propose a linear regression model for birthweight. The model includes babysex, bhead, blength, and malform as predictors. 
+
+```{r}
+mod2 <- lm(bwt ~ blength + gaweeks, data = birthweight)
+mod3 <- lm(bwt ~ babysex * bhead * blength, data = birthweight)
+# compare mod2 and mod3 to mod1, and mke this comparison in terms of the cross-validated prediction error; use crossv_mc and functions in purrr as appropriate.
+
+birthweight |>
+  gather_predictions(mod1, mod2, mod3) |>
+  mutate(model = fct_inorder(model)) |> 
+  ggplot(aes(x = pred, y = bwt)) + 
+  geom_point(alpha = .5) +
+  geom_line(aes(y = pred), color = "red") + 
+  facet_grid(~model)
+```
+
+
+```{r}
+#  cross validation
+cv_df <-  
+  crossv_mc(birthweight, 100) |> 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  )
+
+# calculate the cross-validated prediction error for each model
+cv_res_df <-  
+  cv_df |> 
+  mutate(
+    mod1 = map(train, \(x) mod1),
+    mod2 = map(train, \(x) mod2),
+    mod3 = map(train, \(x) mod3),
+  ) |> 
+  mutate(
+    rmse_mod1 = map2_dbl(mod1, test, rmse),
+    rmse_mod2    = map2_dbl(mod2, test, rmse),
+    rmse_mod3 = map2_dbl(mod3, test, rmse)
+  )
+
+cv_res_df |> 
+  select(starts_with("rmse")) |> 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) |> 
+  ggplot(aes(x = model, y = rmse)) + 
+  geom_violin()
+```
+  
+The third model, which is the interaction model, has the lowest cross-validated prediction error, and it is the best model in terms of goodness of fit among the three.  
